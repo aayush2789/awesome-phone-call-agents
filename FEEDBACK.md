@@ -50,3 +50,20 @@ This log records discoveries, environment verification, assumptions, and key eng
 ### Validation Results (Phase 2)
 - Unit tests: `pytest apps/python/closeloop/tests/ -v` -> 48 passed in 0.32s with 0 warnings.
 - Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.
+
+---
+
+## 2026-09-04: Phase 3 — Standalone Workflow Specification Validator
+
+### Architectural Decisions (Phase 3)
+- **Pre-Execution Gate**: Created a standalone validator in `closeloop/validator.py` executing before any CALL-E adapter or calling layer is reached, preventing invalid specifications from generating side effects.
+- **Path-Indexed Error Attribution**: Every error explicitly indexes the offending JSON path (e.g. `ladder[1].consent_basis`, `outcome.quiet_hours.timezone`, `outcome.result_schema`), conforming to Section 33 of the CloseLoop master plan.
+- **Deep Schema & Timezone Verification**: Checked JSON Schema validity via `jsonschema.Draft202012Validator.check_schema` and confirmed timezone existence via standard library `zoneinfo.ZoneInfo`.
+- **Budget & Ladder Sanity Checks**: Verified non-empty ladders, enforced unique rung names, checked minimum call budgets (`policy.max_calls_total >= 1`), and emitted non-fatal warnings when ladder max attempts exceed policy limits.
+
+### Components Implemented
+- `ValidationErrorDetail`, `ValidationReport`, `WorkflowValidator`, `validate_workflow_spec`
+
+### Validation Results (Phase 3)
+- Unit tests: `pytest apps/python/closeloop/tests/ -v` -> 62 passed in 0.50s with 0 warnings.
+- Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.
