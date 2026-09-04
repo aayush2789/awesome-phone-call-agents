@@ -153,3 +153,27 @@ This log records discoveries, environment verification, assumptions, and key eng
 - Unit tests: `pytest apps/python/closeloop/tests/ -v` -> 126 passed in 0.63s with 0 warnings.
 - Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.
 
+---
+
+## 2026-09-04: Phase 9 — Real CLI Adapter (`CliAdapter`) & Smoke Test Suite
+
+### Architectural Decisions (Phase 9)
+- **Official CLI Command Structure**: Implemented `CliAdapter` invoking official `calle` subcommands (`calle auth status --json`, `calle mcp tools --json`, `calle call plan`, `calle call run`, `calle call status`).
+- **Credential Protection**: Strict sanitation prevents phone numbers, auth tokens, and `confirm_token` parameters from appearing in logs or exception traces.
+- **Mandatory Pre-Execution Inspection Gate**: Enforces `inspect_plan` verification before `run` can be invoked, preventing unauthorized dials or domain violations.
+- **Normalized Error Hierarchy**: Maps timeouts and process exit codes into `CalleExecutionError`, missing binary to `CalleExecutableNotFoundError`, and auth issues to `CalleAuthError`.
+- **Graduated Smoke Testing Utility (`scripts/smoke_test.py`)**:
+  - `--dry-run`: Zero-network offline execution with `FakeAdapter` and persistent `SQLiteLedger`.
+  - `--check-auth`: Verifies local `calle` credentials and required MCP tools (`plan_call`, `run_call`, `get_call_run`) with 0 calls placed.
+  - `--plan-only`: Generates and inspects a real `CallPlan` with `calle call plan` without dialing.
+  - `--live`: Safely initiates a single live call against an authorized developer test phone with strict `--confirm-live` safety requirements.
+
+### Components Implemented
+- `CliAdapter`, `CalleCliError`, `CalleAuthError`, `CalleToolMissingError`, `CalleExecutionError`, `CalleExecutableNotFoundError`, `apps/python/closeloop/scripts/smoke_test.py`
+
+### Validation Results (Phase 9)
+- Unit tests: `pytest apps/python/closeloop/tests/ -v` -> 138 passed in 0.66s with 0 warnings.
+- Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.
+- Live CLI verification: `calle auth status --json` and `calle mcp tools --json` verified; `smoke_test.py --check-auth` passed; `smoke_test.py --plan-only` verified real plan generation (`pG6FDHKC8`).
+
+

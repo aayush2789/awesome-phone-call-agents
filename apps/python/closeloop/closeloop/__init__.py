@@ -60,6 +60,13 @@ from closeloop.ledger import (
     LedgerRepositoryBase,
     SQLiteLedger,
 )
+from closeloop.cli_adapter import (
+    CalleAuthError,
+    CalleCliError,
+    CalleExecutableNotFoundError,
+    CalleExecutionError,
+    CliAdapter,
+)
 
 __version__ = "0.1.0"
 
@@ -73,6 +80,11 @@ __all__ = [
     "CallRun",
     "CallStatus",
     "CalleAdapterBase",
+    "CalleAuthError",
+    "CalleCliError",
+    "CalleExecutableNotFoundError",
+    "CalleExecutionError",
+    "CliAdapter",
     "ContactRung",
     "DuplicateAttemptError",
     "Evidence",
