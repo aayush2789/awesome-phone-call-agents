@@ -85,3 +85,20 @@ This log records discoveries, environment verification, assumptions, and key eng
 ### Validation Results (Phase 4)
 - Unit tests: `pytest apps/python/closeloop/tests/ -v` -> 80 passed in 0.51s with 0 warnings.
 - Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.
+
+---
+
+## 2026-09-04: Phase 5 — Safety Engine (Preflight & Post-Plan Inspection Gate)
+
+### Architectural Decisions (Phase 5)
+- **Fail-Closed Preflight Gating**: Implemented `SafetyEngine.preflight_check` and `assert_preflight` sequentially evaluating kill switch, suppression list, explicit consent, E.164 format, quiet hours in target timezones, call budget limits, and idempotency collisions before authorization.
+- **Mandatory Post-Plan Inspection (Invariants 4 & 11)**: Implemented `SafetyEngine.inspect_plan` and `assert_plan_inspection` ensuring the generated CALL-E `CallPlan` matches the target phone, matches the intended rung, and contains no prohibited clinical, legal, financial, or emergency advice.
+- **Dynamic Suppression Registry**: Supported immediate number suppression upon explicit refusal or opt-out events, preventing subsequent calls across any rung.
+- **Specific Error Hierarchy**: Created specialized `BudgetExhaustedError`, `IdempotencyCollisionError`, `PlanInspectionError`, and `RecipientMismatchError` deriving from `SafetyViolationError`.
+
+### Components Implemented
+- `PreflightCheckResult`, `PostPlanInspectionResult`, `SafetyEngine`, `BudgetExhaustedError`, `IdempotencyCollisionError`, `PlanInspectionError`, `RecipientMismatchError`
+
+### Validation Results (Phase 5)
+- Unit tests: `pytest apps/python/closeloop/tests/ -v` -> 90 passed in 0.53s with 0 warnings.
+- Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.

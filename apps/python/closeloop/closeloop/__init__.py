@@ -37,12 +37,23 @@ from closeloop.adapter import (
     ToolsStatus,
 )
 
+from closeloop.safety_engine import (
+    BudgetExhaustedError,
+    IdempotencyCollisionError,
+    PlanInspectionError,
+    PostPlanInspectionResult,
+    PreflightCheckResult,
+    RecipientMismatchError,
+    SafetyEngine,
+)
+
 __version__ = "0.1.0"
 
 __all__ = [
     "ALL_OUTCOME_CLASSES",
     "AuditEntry",
     "AuthStatus",
+    "BudgetExhaustedError",
     "CallAttempt",
     "CallPlan",
     "CallRun",
@@ -52,12 +63,18 @@ __all__ = [
     "Evidence",
     "ExecutionLedger",
     "FakeAdapter",
+    "IdempotencyCollisionError",
     "OutcomeContract",
     "OutcomeResult",
+    "PlanInspectionError",
     "PlanInspectionResult",
     "PlanRequest",
     "Policy",
+    "PostPlanInspectionResult",
+    "PreflightCheckResult",
     "QuietHoursConfig",
+    "RecipientMismatchError",
+    "SafetyEngine",
     "StrategyConfig",
     "ToolsStatus",
     "ValidationErrorDetail",
