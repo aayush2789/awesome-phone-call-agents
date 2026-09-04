@@ -67,3 +67,21 @@ This log records discoveries, environment verification, assumptions, and key eng
 ### Validation Results (Phase 3)
 - Unit tests: `pytest apps/python/closeloop/tests/ -v` -> 62 passed in 0.50s with 0 warnings.
 - Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.
+
+---
+
+## 2026-09-04: Phase 4 — Abstract CALL-E Adapter & Complete FakeAdapter
+
+### Architectural Decisions (Phase 4)
+- **Adapter Interface Abstraction**: Defined `CalleAdapterBase` establishing the standard CALL-E lifecycle: `auth_status`, `tools_check`, `plan`, `inspect_plan`, `run`, and `status`.
+- **Zero-Cost Dry-Run Determinism**: Built `FakeAdapter` simulating CALL-E without live credentials, network traffic, or phone costs, enabling CI/CD tests and reproducible judging demonstrations.
+- **Complete 11-Class Fixture Matrix**: Authored realistic fixtures for all 11 outcome classes: `confirmed`, `reschedule`, `declined`, `no_answer`, `voicemail`, `screening`, `wrong_person`, `callback_requested`, `hard_refusal`, `error`, and `ambiguous`.
+- **Mandatory Inspection Gate (Invariant 4)**: Enforced fail-closed behavior in `FakeAdapter.run()`, throwing `SafetyViolationError` if `plan.approved` is `False`.
+- **Bounded Polling**: Simulated asynchronous status polling transitions from `running` to terminal states across configurable poll step thresholds.
+
+### Components Implemented
+- `AuthStatus`, `ToolsStatus`, `PlanRequest`, `PlanInspectionResult`, `CallStatus`, `CalleAdapterBase`, `FakeAdapter`, `ALL_OUTCOME_CLASSES`
+
+### Validation Results (Phase 4)
+- Unit tests: `pytest apps/python/closeloop/tests/ -v` -> 80 passed in 0.51s with 0 warnings.
+- Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.

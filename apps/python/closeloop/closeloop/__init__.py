@@ -26,21 +26,40 @@ from closeloop.validator import (
     validate_workflow_spec,
 )
 
+from closeloop.adapter import (
+    ALL_OUTCOME_CLASSES,
+    AuthStatus,
+    CallStatus,
+    CalleAdapterBase,
+    FakeAdapter,
+    PlanInspectionResult,
+    PlanRequest,
+    ToolsStatus,
+)
+
 __version__ = "0.1.0"
 
 __all__ = [
+    "ALL_OUTCOME_CLASSES",
     "AuditEntry",
+    "AuthStatus",
     "CallAttempt",
     "CallPlan",
     "CallRun",
+    "CallStatus",
+    "CalleAdapterBase",
     "ContactRung",
     "Evidence",
     "ExecutionLedger",
+    "FakeAdapter",
     "OutcomeContract",
     "OutcomeResult",
+    "PlanInspectionResult",
+    "PlanRequest",
     "Policy",
     "QuietHoursConfig",
     "StrategyConfig",
+    "ToolsStatus",
     "ValidationErrorDetail",
     "ValidationReport",
     "WorkflowResult",
