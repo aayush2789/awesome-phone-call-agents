@@ -102,3 +102,21 @@ This log records discoveries, environment verification, assumptions, and key eng
 ### Validation Results (Phase 5)
 - Unit tests: `pytest apps/python/closeloop/tests/ -v` -> 90 passed in 0.53s with 0 warnings.
 - Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.
+
+---
+
+## 2026-09-04: Phase 6 — Orchestration Engine (State Machine & Cascade Strategy)
+
+### Architectural Decisions (Phase 6)
+- **Explicit State Machine**: Structured lifecycle states (`INIT` -> `PREFLIGHT` -> `READY` -> `PLANNING` -> `PLAN_APPROVED` -> `RUNNING` -> `RESULT_RECEIVED` -> `RESULT_VALIDATED` -> `[CLOSED | RETRY | NEXT_RUNG | SCHEDULE | HUMAN_REVIEW | BLOCKED | TERMINATED]`) replacing ad-hoc branching.
+- **Cascade Strategy Implementation**: Iterates sequentially through contact rungs, checking attempt limits, budget restrictions, and routing fallback policies (`on_voicemail`, `on_wrong_person`, `on_hard_refusal`).
+- **Dynamic Outcome Evaluation**: Evaluated declarative `stop_when` rules against JSON schema-validated structured results to determine objective closure.
+- **Calls Avoided Optimization**: Accurately computes `calls_avoided = max_possible_calls - calls_placed`, mathematically proving efficiency gains when an outcome closes early in the ladder.
+- **Export Writeback**: Seamlessly exports envelope results to CSV or JSON formats when configured.
+
+### Components Implemented
+- `WorkflowState`, `OrchestrationEngine`, `evaluate_stop_condition`, `execute_workflow`
+
+### Validation Results (Phase 6)
+- Unit tests: `pytest apps/python/closeloop/tests/ -v` -> 97 passed in 0.68s with 0 warnings.
+- Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.

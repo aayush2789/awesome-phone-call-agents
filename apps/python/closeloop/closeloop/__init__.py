@@ -47,6 +47,13 @@ from closeloop.safety_engine import (
     SafetyEngine,
 )
 
+from closeloop.engine import (
+    OrchestrationEngine,
+    WorkflowState,
+    evaluate_stop_condition,
+    execute_workflow,
+)
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -64,6 +71,7 @@ __all__ = [
     "ExecutionLedger",
     "FakeAdapter",
     "IdempotencyCollisionError",
+    "OrchestrationEngine",
     "OutcomeContract",
     "OutcomeResult",
     "PlanInspectionError",
@@ -81,8 +89,11 @@ __all__ = [
     "ValidationReport",
     "WorkflowResult",
     "WorkflowSpec",
+    "WorkflowState",
     "WorkflowValidator",
     "WritebackConfig",
     "compute_idempotency_key",
+    "evaluate_stop_condition",
+    "execute_workflow",
     "validate_workflow_spec",
 ]
