@@ -31,3 +31,22 @@ This log records discoveries, environment verification, assumptions, and key eng
 ### Validation Results (Phase 1)
 - Unit tests: `pytest apps/python/closeloop/tests/test_safety_contract.py -v` -> 34 passed in 0.29s.
 - Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.
+
+---
+
+## 2026-09-04: Phase 2 — Typed Internal Data Model
+
+### Architectural Decisions (Phase 2)
+- **Provider-Independent Modeling**: Created Pydantic v2 domain models decoupling CALL-E runtime/CLI specifics from CloseLoop's business logic.
+- **Fail-Closed Field Validation**: Validated E.164 formatting (`E164ValidationError`) and non-empty explicit consent basis (`ConsentMissingError`) directly at model instantiation in `ContactRung`.
+- **Deterministic Idempotency**: Automated key generation `sha256(run_id:rung:attempt)` on `CallAttempt` to guarantee replay safety and crash recovery across restarts.
+- **Mandatory Inspection State**: Encapsulated `CallPlan` with explicit approval/rejection state machines (`approved`, `rejection_reason`), enforcing that calls cannot proceed without inspection.
+- **Standardized Result Envelope**: Implemented `WorkflowResult.to_envelope_dict()` conforming to Section 19 shared result envelope specification with automated recipient phone masking and ISO-8601 formatting.
+
+### Models Implemented
+- `QuietHoursConfig`, `OutcomeContract`, `ContactRung`, `Policy`, `StrategyConfig`, `WritebackConfig`, `WorkflowSpec`
+- `CallPlan`, `CallRun`, `Evidence`, `OutcomeResult`, `AuditEntry`, `CallAttempt`, `ExecutionLedger`, `WorkflowResult`
+
+### Validation Results (Phase 2)
+- Unit tests: `pytest apps/python/closeloop/tests/ -v` -> 48 passed in 0.32s with 0 warnings.
+- Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.
