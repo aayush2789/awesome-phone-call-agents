@@ -1,9 +1,7 @@
 """CloseLoop Orchestration Engine.
 
-Implements the explicit state machine and cascade orchestration strategy.
-Executes workflows across rungs, enforces preflight and post-plan inspection
-gates, manages bounded polling, evaluates outcome contracts, and computes
-calls placed vs avoided.
+Implements the explicit state machine, cascade strategy, outcome classification,
+declarative policy routing, and SQLite-backed persistent idempotency.
 """
 
 from __future__ import annotations
@@ -18,6 +16,8 @@ from typing import Any, Optional
 import jsonschema
 
 from closeloop.adapter import CalleAdapterBase, FakeAdapter, PlanRequest
+from closeloop.classifier import OutcomeClassifier
+from closeloop.ledger import LedgerRepositoryBase, SQLiteLedger
 from closeloop.models import (
     AuditEntry,
     CallAttempt,
@@ -27,6 +27,7 @@ from closeloop.models import (
     WorkflowResult,
     WorkflowSpec,
 )
+from closeloop.routing import RoutingAction, RoutingDecision, RoutingEngine
 from closeloop.safety_engine import SafetyEngine
 from closeloop.validator import WorkflowValidator
 
@@ -105,10 +106,16 @@ class OrchestrationEngine:
         adapter: Optional[CalleAdapterBase] = None,
         safety_engine: Optional[SafetyEngine] = None,
         validator: Optional[WorkflowValidator] = None,
+        classifier: Optional[OutcomeClassifier] = None,
+        routing_engine: Optional[RoutingEngine] = None,
+        ledger: Optional[LedgerRepositoryBase] = None,
     ) -> None:
         self.adapter: CalleAdapterBase = adapter or FakeAdapter()
         self.safety_engine: SafetyEngine = safety_engine or SafetyEngine()
         self.validator: WorkflowValidator = validator or WorkflowValidator()
+        self.classifier: OutcomeClassifier = classifier or OutcomeClassifier()
+        self.routing_engine: RoutingEngine = routing_engine or RoutingEngine()
+        self.ledger: LedgerRepositoryBase = ledger or SQLiteLedger(":memory:")
         self.state: WorkflowState = WorkflowState.INIT
 
     def run(
@@ -116,7 +123,7 @@ class OrchestrationEngine:
         workflow_input: WorkflowSpec | str | dict[str, Any] | Path,
         current_dt: Optional[datetime] = None,
     ) -> WorkflowResult:
-        """Execute a CloseLoop workflow using the Cascade strategy."""
+        """Execute a CloseLoop workflow using Cascade strategy, SQLite ledger, and classification."""
         self.state = WorkflowState.INIT
         now_utc = current_dt or datetime.now(timezone.utc)
         start_time = now_utc
@@ -132,7 +139,7 @@ class OrchestrationEngine:
             elif isinstance(workflow_input, dict):
                 run_id = workflow_input.get("run_id", "unknown_run")
 
-            return WorkflowResult(
+            res = WorkflowResult(
                 run_id=run_id,
                 status="blocked",
                 outcome="error",
@@ -140,6 +147,7 @@ class OrchestrationEngine:
                 started_at=start_time,
                 completed_at=datetime.now(timezone.utc),
             )
+            return res
 
         # Parse valid WorkflowSpec
         if isinstance(workflow_input, WorkflowSpec):
@@ -151,9 +159,27 @@ class OrchestrationEngine:
         else:
             workflow = WorkflowSpec(**workflow_input)
 
-        # Initialize Ledger
-        ledger = ExecutionLedger(run_id=workflow.run_id)
-        audit_trail: list[AuditEntry] = []
+        # Register workflow in persistent ledger
+        self.ledger.record_workflow(workflow)
+
+        # Crash Recovery: Reconcile stranded in-flight attempts from prior runs
+        stranded = self.ledger.reconcile_in_flight_attempts(workflow.run_id)
+        if stranded:
+            audit_recon = AuditEntry(
+                rung="system",
+                attempt=0,
+                action="crash_recovery_reconciliation",
+                details={"stranded_attempts_reconciled": len(stranded)},
+            )
+            self.ledger.record_audit(workflow.run_id, audit_recon)
+
+        # Synchronize execution tracking
+        in_memory_ledger = ExecutionLedger(run_id=workflow.run_id)
+        existing_attempts = self.ledger.list_attempts(workflow.run_id)
+        for att in existing_attempts:
+            in_memory_ledger.record_attempt(att)
+            if att.status == "terminal":
+                in_memory_ledger.total_calls_placed += 1
 
         total_ladder_attempts = sum(r.max_attempts for r in workflow.ladder)
         max_possible_calls = min(total_ladder_attempts, workflow.policy.max_calls_total)
@@ -163,22 +189,27 @@ class OrchestrationEngine:
         # Cascade Strategy Loop: Iterate sequentially through rungs
         for rung_idx, rung in enumerate(workflow.ladder):
             rung_attempt_count = 0
+            next_rung_obj = workflow.ladder[rung_idx + 1] if rung_idx + 1 < len(workflow.ladder) else None
 
             while rung_attempt_count < rung.max_attempts:
                 # Check global call budget
-                if ledger.total_calls_placed >= workflow.policy.max_calls_total:
+                if in_memory_ledger.total_calls_placed >= workflow.policy.max_calls_total:
                     self.state = WorkflowState.TERMINATED
-                    audit_trail.append(
-                        AuditEntry(
-                            rung=rung.rung,
-                            attempt=rung_attempt_count + 1,
-                            action="budget_exhausted",
-                            details={"total_placed": ledger.total_calls_placed, "limit": workflow.policy.max_calls_total},
-                        )
+                    audit_entry = AuditEntry(
+                        rung=rung.rung,
+                        attempt=rung_attempt_count + 1,
+                        action="budget_exhausted",
+                        details={"total_placed": in_memory_ledger.total_calls_placed, "limit": workflow.policy.max_calls_total},
                     )
+                    self.ledger.record_audit(workflow.run_id, audit_entry)
                     break
 
                 attempt_index = rung_attempt_count + 1
+
+                # Check Persistent Ledger for existing terminal attempt (Idempotency)
+                if self.ledger.is_attempt_terminal(workflow.run_id, rung.rung, attempt_index):
+                    rung_attempt_count += 1
+                    continue
 
                 # Step 2: PREFLIGHT Safety Gate
                 self.state = WorkflowState.PREFLIGHT
@@ -186,37 +217,37 @@ class OrchestrationEngine:
                     workflow=workflow,
                     rung=rung,
                     attempt_num=attempt_index,
-                    ledger=ledger,
+                    ledger=in_memory_ledger,
                     current_dt=now_utc,
                 )
 
                 if not preflight.passed:
                     self.state = WorkflowState.BLOCKED
-                    audit_trail.append(
-                        AuditEntry(
-                            rung=rung.rung,
-                            attempt=attempt_index,
-                            action="preflight_failed",
-                            details={"reason": preflight.reason, "failed_check": preflight.failed_check},
-                        )
+                    audit_entry = AuditEntry(
+                        rung=rung.rung,
+                        attempt=attempt_index,
+                        action="preflight_failed",
+                        details={"reason": preflight.reason, "failed_check": preflight.failed_check},
                     )
-                    # If suppression or kill switch, terminate entirely fail-closed
+                    self.ledger.record_audit(workflow.run_id, audit_entry)
+
                     if preflight.failed_check in {"kill_switch", "suppression"}:
                         final_result = WorkflowResult(
                             run_id=workflow.run_id,
                             status="blocked",
                             outcome="blocked",
                             summary=f"Workflow blocked by safety gate: {preflight.reason}",
-                            calls_placed=ledger.total_calls_placed,
-                            calls_avoided=max(0, max_possible_calls - ledger.total_calls_placed),
+                            calls_placed=in_memory_ledger.total_calls_placed,
+                            calls_avoided=max(0, max_possible_calls - in_memory_ledger.total_calls_placed),
                             started_at=start_time,
                             completed_at=datetime.now(timezone.utc),
-                            audit=audit_trail,
+                            audit=self.ledger.get_audit_trail(workflow.run_id),
                         )
+                        self.ledger.save_workflow_result(final_result)
                         self._writeback_if_configured(workflow, final_result)
                         return final_result
                     else:
-                        # Rung skipped due to quiet hours or specific preflight issue, escalate to next rung
+                        # Rung skipped due to quiet hours or non-fatal preflight issue, advance to next rung
                         break
 
                 # Step 3: READY -> PLANNING
@@ -240,59 +271,65 @@ class OrchestrationEngine:
                 inspection = self.safety_engine.inspect_plan(call_plan, rung, workflow)
                 if not inspection.approved:
                     self.state = WorkflowState.BLOCKED
-                    audit_trail.append(
-                        AuditEntry(
-                            rung=rung.rung,
-                            attempt=attempt_index,
-                            action="plan_rejected",
-                            details={"reason": inspection.reason, "violations": inspection.domain_violations},
-                        )
+                    audit_entry = AuditEntry(
+                        rung=rung.rung,
+                        attempt=attempt_index,
+                        action="plan_rejected",
+                        details={"reason": inspection.reason, "violations": inspection.domain_violations},
                     )
+                    self.ledger.record_audit(workflow.run_id, audit_entry)
+
                     final_result = WorkflowResult(
                         run_id=workflow.run_id,
                         status="blocked",
                         outcome="error",
                         summary=f"CallPlan rejected by post-plan safety inspection: {inspection.reason}",
-                        calls_placed=ledger.total_calls_placed,
-                        calls_avoided=max(0, max_possible_calls - ledger.total_calls_placed),
+                        calls_placed=in_memory_ledger.total_calls_placed,
+                        calls_avoided=max(0, max_possible_calls - in_memory_ledger.total_calls_placed),
                         started_at=start_time,
                         completed_at=datetime.now(timezone.utc),
-                        audit=audit_trail,
+                        audit=self.ledger.get_audit_trail(workflow.run_id),
                     )
+                    self.ledger.save_workflow_result(final_result)
                     self._writeback_if_configured(workflow, final_result)
                     return final_result
 
                 self.state = WorkflowState.PLAN_APPROVED
 
-                # Step 5: RUNNING
+                # Step 5: RUNNING (Transactional State Transition planned -> executing)
                 self.state = WorkflowState.RUNNING
                 attempt = CallAttempt(
                     run_id=workflow.run_id,
                     rung=rung.rung,
                     attempt=attempt_index,
                     phone=rung.phone,
-                    status="executing",
+                    status="planned",
                     plan=call_plan,
                 )
-                ledger.record_attempt(attempt)
+                # Persist planned attempt in SQLite
+                if not self.ledger.has_attempt(workflow.run_id, rung.rung, attempt_index):
+                    self.ledger.record_attempt(attempt)
+
+                # Transition to executing before side effect
+                self.ledger.update_attempt_status(attempt.idempotency_key, "executing")
+                attempt.status = "executing"
+
                 call_run = self.adapter.run(call_plan)
                 attempt.run = call_run
-                ledger.total_calls_placed += 1
+                in_memory_ledger.total_calls_placed += 1
                 rung_attempt_count += 1
 
-                audit_trail.append(
-                    AuditEntry(
-                        rung=rung.rung,
-                        attempt=attempt_index,
-                        action="call_started",
-                        details={"external_call_id": call_run.external_call_id, "phone": rung.phone},
-                    )
+                audit_started = AuditEntry(
+                    rung=rung.rung,
+                    attempt=attempt_index,
+                    action="call_started",
+                    details={"external_call_id": call_run.external_call_id, "phone": rung.phone},
                 )
+                self.ledger.record_audit(workflow.run_id, audit_started)
 
                 # Step 6: RESULT_RECEIVED (Bounded Polling)
                 self.state = WorkflowState.RESULT_RECEIVED
                 status_res = self.adapter.status(call_run.run_id)
-                # If adapter supports async delay, poll until terminal
                 poll_max = 5
                 polls = 0
                 while status_res.status == "running" and polls < poll_max:
@@ -303,167 +340,136 @@ class OrchestrationEngine:
                 call_run.structured_result = status_res.structured_result
                 call_run.error = status_res.error
 
-                # Step 7: RESULT_VALIDATED
+                # Step 7: RESULT_VALIDATED via Deterministic OutcomeClassifier
                 self.state = WorkflowState.RESULT_VALIDATED
-                raw_structured = status_res.structured_result or {}
+                outcome_result = self.classifier.classify(status_res, workflow.outcome)
 
-                # Validate structured result against JSON Schema
-                validation_errors: list[str] = []
-                schema_valid = True
-                if workflow.outcome.result_schema:
-                    try:
-                        jsonschema.validate(instance=raw_structured, schema=workflow.outcome.result_schema)
-                    except jsonschema.ValidationError as val_err:
-                        schema_valid = False
-                        validation_errors.append(val_err.message)
-                    except Exception as err:
-                        schema_valid = False
-                        validation_errors.append(str(err))
-
-                # Evaluate stop condition
-                stop_met = False
-                if schema_valid and workflow.outcome.stop_when:
-                    stop_met = evaluate_stop_condition(workflow.outcome.stop_when, raw_structured)
-
-                # Extract outcome class
-                raw_fixture = status_res.raw_data or {}
-                outcome_class = raw_fixture.get("outcome_class")
-                if not outcome_class:
-                    if status_res.status == "failed":
-                        outcome_class = "error"
-                    elif raw_structured.get("decision"):
-                        outcome_class = str(raw_structured["decision"])
-                    else:
-                        outcome_class = "unknown"
-
-                evidence_data = raw_fixture.get("evidence")
-                evidence_obj = Evidence(**evidence_data) if evidence_data else None
-
-                outcome_result = OutcomeResult(
-                    outcome_class=outcome_class,
-                    decision=raw_structured.get("decision"),
-                    structured_result=raw_structured,
-                    result_validation={"valid": schema_valid, "errors": validation_errors},
-                    evidence=evidence_obj,
-                    stop_condition_met=stop_met,
-                )
-
+                # Atomically transition attempt to terminal in persistent ledger
                 attempt.outcome = outcome_result
                 attempt.status = "terminal"
-                ledger.record_attempt(attempt)
+                self.ledger.update_attempt_status(
+                    attempt.idempotency_key,
+                    "terminal",
+                    run=call_run,
+                    outcome=outcome_result,
+                )
+                in_memory_ledger.record_attempt(attempt)
 
-                audit_trail.append(
-                    AuditEntry(
-                        rung=rung.rung,
-                        attempt=attempt_index,
-                        action="result_validated",
-                        outcome_class=outcome_class,
-                        details={
-                            "stop_condition_met": stop_met,
-                            "schema_valid": schema_valid,
-                            "decision": raw_structured.get("decision"),
-                        },
-                    )
+                audit_validated = AuditEntry(
+                    rung=rung.rung,
+                    attempt=attempt_index,
+                    action="result_validated",
+                    outcome_class=outcome_result.outcome_class,
+                    details={
+                        "stop_condition_met": outcome_result.stop_condition_met,
+                        "schema_valid": outcome_result.result_validation.get("valid", True),
+                        "decision": outcome_result.decision,
+                        "confidence": outcome_result.confidence,
+                    },
+                )
+                self.ledger.record_audit(workflow.run_id, audit_validated)
+
+                # Step 8: Declarative Routing via RoutingEngine
+                routing_decision = self.routing_engine.route(
+                    outcome=outcome_result,
+                    current_rung=rung,
+                    policy=workflow.policy,
+                    attempts_on_rung=rung_attempt_count,
+                    total_calls_placed=in_memory_ledger.total_calls_placed,
+                    next_rung=next_rung_obj,
                 )
 
-                # Routing Decision Branch
-                if stop_met:
-                    # Outcome successfully closed!
+                if routing_decision.action == RoutingAction.CLOSE:
                     self.state = WorkflowState.CLOSED
-                    calls_avoided = max(0, max_possible_calls - ledger.total_calls_placed)
-                    ledger.total_calls_avoided = calls_avoided
+                    calls_avoided = max(0, max_possible_calls - in_memory_ledger.total_calls_placed)
 
-                    audit_trail.append(
-                        AuditEntry(
-                            rung=rung.rung,
-                            attempt=attempt_index,
-                            action="closed",
-                            outcome_class=outcome_class,
-                            details={"closed_on_rung": rung.rung, "calls_avoided": calls_avoided},
-                        )
+                    audit_closed = AuditEntry(
+                        rung=rung.rung,
+                        attempt=attempt_index,
+                        action="closed",
+                        outcome_class=outcome_result.outcome_class,
+                        details={"closed_on_rung": rung.rung, "calls_avoided": calls_avoided},
                     )
+                    self.ledger.record_audit(workflow.run_id, audit_closed)
 
                     final_result = WorkflowResult(
                         run_id=workflow.run_id,
                         status="closed",
-                        outcome=outcome_class,
+                        outcome=outcome_result.outcome_class,
                         summary=f"Outcome '{workflow.outcome.name}' successfully closed on rung '{rung.rung}'.",
-                        structured_result=raw_structured,
-                        result_validation={"valid": schema_valid, "errors": validation_errors},
+                        structured_result=outcome_result.structured_result,
+                        result_validation=outcome_result.result_validation,
                         closed_on_rung=rung.rung,
                         attempt_index=attempt_index,
-                        calls_placed=ledger.total_calls_placed,
+                        calls_placed=in_memory_ledger.total_calls_placed,
                         calls_avoided=calls_avoided,
                         external_call_id=call_run.external_call_id,
                         recipient_phone_e164=rung.phone,
                         started_at=start_time,
                         completed_at=datetime.now(timezone.utc),
-                        audit=audit_trail,
+                        audit=self.ledger.get_audit_trail(workflow.run_id),
                     )
+                    self.ledger.save_workflow_result(final_result)
                     self._writeback_if_configured(workflow, final_result)
                     return final_result
 
-                # Check for Hard Refusal: stop chain and register suppression
-                if outcome_class == "hard_refusal" or raw_structured.get("decision") == "hard_refusal":
-                    self.safety_engine.add_to_suppression(rung.phone)
-                    if workflow.policy.on_hard_refusal == "stop_chain":
-                        self.state = WorkflowState.TERMINATED
-                        calls_avoided = max(0, max_possible_calls - ledger.total_calls_placed)
-                        audit_trail.append(
-                            AuditEntry(
-                                rung=rung.rung,
-                                attempt=attempt_index,
-                                action="suppressed_and_terminated",
-                                outcome_class="hard_refusal",
-                                details={"policy": "stop_chain"},
-                            )
-                        )
-                        final_result = WorkflowResult(
-                            run_id=workflow.run_id,
-                            status="terminated",
-                            outcome="hard_refusal",
-                            summary=f"Workflow permanently stopped due to explicit refusal. Phone {rung.phone} added to suppression registry.",
-                            structured_result=raw_structured,
-                            result_validation={"valid": schema_valid, "errors": validation_errors},
-                            closed_on_rung=rung.rung,
-                            attempt_index=attempt_index,
-                            calls_placed=ledger.total_calls_placed,
-                            calls_avoided=calls_avoided,
-                            external_call_id=call_run.external_call_id,
-                            recipient_phone_e164=rung.phone,
-                            started_at=start_time,
-                            completed_at=datetime.now(timezone.utc),
-                            audit=audit_trail,
-                        )
-                        self._writeback_if_configured(workflow, final_result)
-                        return final_result
+                elif routing_decision.action == RoutingAction.SUPPRESS_AND_STOP:
+                    self.state = WorkflowState.TERMINATED
+                    if routing_decision.suppress_phone:
+                        self.safety_engine.add_to_suppression(routing_decision.suppress_phone)
 
-                # Check Voicemail Routing Directive
-                if outcome_class == "voicemail" and workflow.policy.on_voicemail == "next_rung":
+                    calls_avoided = max(0, max_possible_calls - in_memory_ledger.total_calls_placed)
+                    audit_supp = AuditEntry(
+                        rung=rung.rung,
+                        attempt=attempt_index,
+                        action="suppressed_and_terminated",
+                        outcome_class="hard_refusal",
+                        details={"policy": "stop_chain", "reason": routing_decision.reason},
+                    )
+                    self.ledger.record_audit(workflow.run_id, audit_supp)
+
+                    final_result = WorkflowResult(
+                        run_id=workflow.run_id,
+                        status="terminated",
+                        outcome="hard_refusal",
+                        summary=f"Workflow permanently stopped due to explicit refusal. Phone {rung.phone} added to suppression registry.",
+                        structured_result=outcome_result.structured_result,
+                        result_validation=outcome_result.result_validation,
+                        closed_on_rung=rung.rung,
+                        attempt_index=attempt_index,
+                        calls_placed=in_memory_ledger.total_calls_placed,
+                        calls_avoided=calls_avoided,
+                        external_call_id=call_run.external_call_id,
+                        recipient_phone_e164=rung.phone,
+                        started_at=start_time,
+                        completed_at=datetime.now(timezone.utc),
+                        audit=self.ledger.get_audit_trail(workflow.run_id),
+                    )
+                    self.ledger.save_workflow_result(final_result)
+                    self._writeback_if_configured(workflow, final_result)
+                    return final_result
+
+                elif routing_decision.action == RoutingAction.NEXT_RUNG:
                     self.state = WorkflowState.NEXT_RUNG
-                    break  # Break inner loop, escalate immediately to next rung
+                    break  # Break attempt loop on current rung, advance to next rung in ladder
 
-                # Check Wrong Person Routing Directive
-                if outcome_class == "wrong_person" and workflow.policy.on_wrong_person in {"transfer_then_next", "next_rung"}:
-                    self.state = WorkflowState.NEXT_RUNG
-                    break  # Break inner loop, advance to next rung
+                elif routing_decision.action == RoutingAction.RETRY:
+                    self.state = WorkflowState.RETRY
+                    continue
 
-                # Check Error Routing Directive
-                if outcome_class == "error" and workflow.policy.on_error == "fail_closed":
+                elif routing_decision.action == RoutingAction.SCHEDULE:
+                    self.state = WorkflowState.SCHEDULE
+                    # For synchronous execution, advance or break according to policy
+                    break
+
+                elif routing_decision.action in {RoutingAction.FAIL_CLOSED, RoutingAction.TERMINATE}:
                     self.state = WorkflowState.TERMINATED
                     break
 
-                # If no_answer or retry needed, loop continues if rung_attempt_count < max_attempts
-                if rung_attempt_count < rung.max_attempts:
-                    self.state = WorkflowState.RETRY
-                else:
-                    self.state = WorkflowState.NEXT_RUNG
-
-            # If terminated globally or budget exhausted, stop outer ladder iteration
             if self.state == WorkflowState.TERMINATED:
                 break
 
-        # If loop exits without closing
+        # Terminal Fallback: All rungs or budgets exhausted without closure
         self.state = WorkflowState.TERMINATED
         final_result = WorkflowResult(
             run_id=workflow.run_id,
@@ -474,14 +480,15 @@ class OrchestrationEngine:
             result_validation=None,
             closed_on_rung=None,
             attempt_index=None,
-            calls_placed=ledger.total_calls_placed,
+            calls_placed=in_memory_ledger.total_calls_placed,
             calls_avoided=0,
             external_call_id=None,
             recipient_phone_e164=None,
             started_at=start_time,
             completed_at=datetime.now(timezone.utc),
-            audit=audit_trail,
+            audit=self.ledger.get_audit_trail(workflow.run_id),
         )
+        self.ledger.save_workflow_result(final_result)
         self._writeback_if_configured(workflow, final_result)
         return final_result
 
@@ -521,7 +528,6 @@ class OrchestrationEngine:
                         writer.writeheader()
                     writer.writerow(row)
         except Exception:
-            # Writeback failures should not crash workflow execution
             pass
 
 
@@ -529,7 +535,8 @@ def execute_workflow(
     workflow: WorkflowSpec | str | dict[str, Any] | Path,
     adapter: Optional[CalleAdapterBase] = None,
     current_dt: Optional[datetime] = None,
+    ledger: Optional[LedgerRepositoryBase] = None,
 ) -> WorkflowResult:
     """Convenience function to run a CloseLoop workflow with default orchestration."""
-    engine = OrchestrationEngine(adapter=adapter)
+    engine = OrchestrationEngine(adapter=adapter, ledger=ledger)
     return engine.run(workflow, current_dt=current_dt)

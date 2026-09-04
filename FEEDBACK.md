@@ -120,3 +120,36 @@ This log records discoveries, environment verification, assumptions, and key eng
 ### Validation Results (Phase 6)
 - Unit tests: `pytest apps/python/closeloop/tests/ -v` -> 97 passed in 0.68s with 0 warnings.
 - Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.
+
+---
+
+## 2026-09-04: Phase 7 — Outcome Classification & Data-Driven Routing
+
+### Architectural Decisions (Phase 7)
+- **11 Normalized Outcome Classes**: Built `OutcomeClassifier` mapping raw adapter output, call statuses, and fixture fields to the standard CloseLoop 11-outcome ontology: `confirmed`, `reschedule`, `declined`, `no_answer`, `voicemail`, `screening`, `wrong_person`, `callback_requested`, `hard_refusal`, `ambiguous`, and `error`.
+- **Deterministic Rule-Based Normalization**: Zero LLM dependency. Evaluates structured result payloads, telephony flags (`answered`, `beep_detected`, `gatekeeper_action`), and semantic decision keys deterministically.
+- **Fail-Safe Confidence Thresholding**: Automatically demotes any outcome with confidence < 0.60 or contradictory signals to `ambiguous`, ensuring ambiguous/unverifiable claims never satisfy stop conditions.
+- **JSON Schema Validation**: Validates structured results against the workflow contract's `result_schema` using `jsonschema`, recording detailed validation errors.
+- **Decoupled Routing Engine**: Implemented `RoutingEngine` determining deterministic next actions (`close`, `next_rung`, `retry_same_rung`, `schedule_retry`, `human_review`, `stop_chain`, `fail_closed`) based on policy rules, budget status, and ladder position.
+
+### Components Implemented
+- `OutcomeClassifier`, `RoutingEngine`, `RoutingAction`, `RoutingDecision`
+
+---
+
+## 2026-09-04: Phase 8 — Persistent Idempotency Ledger (SQLite Implementation)
+
+### Architectural Decisions (Phase 8)
+- **Ledger Repository Abstraction**: Defined `LedgerRepositoryBase` interface specifying abstract contracts for workflow specs, attempt lifecycles, state transitions, audit trails, and crash recovery, ensuring engine storage engine swappability.
+- **Database-Enforced Idempotency**: Built `SQLiteLedger` with WAL journaling, foreign keys, and unique constraints on `idempotency_key = sha256(run_id:rung:attempt)`. Duplicate insertions raise `DuplicateAttemptError` (derived from `SafetyViolationError`), guaranteeing the zero-duplicate-calls invariant.
+- **Transactional State Transitions**: Supported explicit transitions (`planned` -> `executing` -> `terminal`) with atomic updates for call runs, classified outcomes, and execution errors.
+- **Crash Recovery & Reconciliation**: Implemented `reconcile_in_flight_attempts(run_id)` detecting attempts stranded in `executing` status across process restarts and marking them as `needs_reconciliation` rather than blindly redialing.
+- **Complete Audit Trail & Envelope Persistence**: Persisted full chronological audit trails and finalized standard outcome result envelopes.
+
+### Components Implemented
+- `LedgerRepositoryBase`, `SQLiteLedger`, `DuplicateAttemptError`
+
+### Validation Results (Phase 7 & 8)
+- Unit tests: `pytest apps/python/closeloop/tests/ -v` -> 126 passed in 0.63s with 0 warnings.
+- Repository validation: `python scripts/validate_repository.py` -> Passed with code 0.
+

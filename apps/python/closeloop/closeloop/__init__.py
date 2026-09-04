@@ -53,6 +53,13 @@ from closeloop.engine import (
     evaluate_stop_condition,
     execute_workflow,
 )
+from closeloop.classifier import OutcomeClassifier
+from closeloop.routing import RoutingAction, RoutingDecision, RoutingEngine
+from closeloop.ledger import (
+    DuplicateAttemptError,
+    LedgerRepositoryBase,
+    SQLiteLedger,
+)
 
 __version__ = "0.1.0"
 
@@ -67,11 +74,14 @@ __all__ = [
     "CallStatus",
     "CalleAdapterBase",
     "ContactRung",
+    "DuplicateAttemptError",
     "Evidence",
     "ExecutionLedger",
     "FakeAdapter",
     "IdempotencyCollisionError",
+    "LedgerRepositoryBase",
     "OrchestrationEngine",
+    "OutcomeClassifier",
     "OutcomeContract",
     "OutcomeResult",
     "PlanInspectionError",
@@ -82,6 +92,10 @@ __all__ = [
     "PreflightCheckResult",
     "QuietHoursConfig",
     "RecipientMismatchError",
+    "RoutingAction",
+    "RoutingDecision",
+    "RoutingEngine",
+    "SQLiteLedger",
     "SafetyEngine",
     "StrategyConfig",
     "ToolsStatus",
